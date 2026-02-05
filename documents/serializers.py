@@ -1,0 +1,241 @@
+# documents/serializers.py
+from rest_framework import serializers
+from documents.models import (
+    WorkerDocument, DocumentVerificationRequest, DocumentTypeConfig
+)
+from users.serializers import WorkerProfileSerializer, UserSerializer
+from ai.services import OCRService
+
+
+class DocumentTypeConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DocumentTypeConfig
+        fields = '__all__'
+
+
+class WorkerDocumentSerializer(serializers.ModelSerializer):
+    worker = WorkerProfileSerializer(read_only=True)
+    uploaded_by = UserSerializer(read_only=True)
+    verified_by = UserSerializer(read_only=True)
+    
+    # FIXED: Use 'file_url' instead of 'document_url'
+    file_url = serializers.SerializerMethodField()
+    file_size_mb = serializers.SerializerMethodField()
+    file_extension = serializers.SerializerMethodField()
+    is_expiring_soon = serializers.SerializerMethodField()
+    days_until_expiry = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = WorkerDocument
+        # FIXED: Use actual model fields
+        fields = [
+            'id', 'worker', 'uploaded_by', 'verified_by', 'document_type',
+            'document_file', 'file_url', 'file_size_mb', 'file_extension',
+            'document_number', 'issue_date', 'expiry_date', 'issuing_authority',
+            'status', 'verification_notes', 'ai_ocr_result', 'ai_confidence_score',
+            'ai_extracted_data', 'is_expiring_soon', 'days_until_expiry',
+            'uploaded_at', 'updated_at', 'verified_at'
+        ]
+        read_only_fields = [
+            'uploaded_at', 'updated_at', 'verified_at',
+            'ai_ocr_result', 'ai_confidence_score', 'ai_extracted_data'
+        ]
+    
+    def get_file_url(self, obj):
+        """Generate full URL for the document file"""
+        if obj.document_file and hasattr(obj.document_file, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.document_file.url)
+            return obj.document_file.url
+        return None
+    
+    def get_file_size_mb(self, obj):
+        """Get file size in MB"""
+        if obj.document_file:
+            size_bytes = obj.document_file.size
+            return round(size_bytes / (1024 * 1024), 2)
+        return None
+    
+    def get_file_extension(self, obj):
+        """Get file extension"""
+        if obj.document_file:
+            return obj.document_file.name.split('.')[-1].lower()
+        return None
+    
+    def get_is_expiring_soon(self, obj):
+        """Check if document is expiring soon (within 30 days)"""
+        if not obj.expiry_date:
+            return False
+        
+        from django.utils import timezone
+        today = timezone.now().date()
+        days_until_expiry = (obj.expiry_date - today).days
+        return 0 <= days_until_expiry <= 30
+    
+    def get_days_until_expiry(self, obj):
+        """Get days until expiry"""
+        if not obj.expiry_date:
+            return None
+        
+        from django.utils import timezone
+        today = timezone.now().date()
+        delta = obj.expiry_date - today
+        return delta.days
+        return None
+    
+    def validate(self, data):
+        # Validate file size
+        document_file = data.get('document_file')
+        if document_file:
+            max_size_mb = 10  # Default max size
+            file_size_mb = document_file.size / (1024 * 1024)
+            
+            if file_size_mb > max_size_mb:
+                raise serializers.ValidationError(
+                    f"File size must be less than {max_size_mb}MB"
+                )
+        
+        # Validate expiry date
+        expiry_date = data.get('expiry_date')
+        if expiry_date:
+            from django.utils import timezone
+            if expiry_date < timezone.now().date():
+                raise serializers.ValidationError(
+                    "Expiry date cannot be in the past"
+                )
+        
+        # Validate issue date vs expiry date
+        issue_date = data.get('issue_date')
+        if issue_date and expiry_date and issue_date > expiry_date:
+            raise serializers.ValidationError(
+                "Issue date cannot be after expiry date"
+            )
+        
+        return data
+    
+    def create(self, validated_data):
+        request = self.context['request']
+        worker = request.user.workerprofile
+        
+        # Check if document type already exists for this worker
+        document_type = validated_data['document_type']
+        existing_document = WorkerDocument.objects.filter(
+            worker=worker,
+            document_type=document_type
+        ).first()
+        
+        if existing_document:
+            # Update existing document
+            for field, value in validated_data.items():
+                setattr(existing_document, field, value)
+            
+            existing_document.uploaded_by = request.user
+            existing_document.status = WorkerDocument.Status.PENDING
+            existing_document.save()
+            
+            # Process with AI OCR if applicable
+            self.process_ai_verification(existing_document)
+            
+            return existing_document
+        
+        # Create new document
+        validated_data['worker'] = worker
+        validated_data['uploaded_by'] = request.user
+        
+        document = super().create(validated_data)
+        
+        # Process with AI OCR if applicable
+        self.process_ai_verification(document)
+        
+        return document
+    
+    def process_ai_verification(self, document):
+        """Process document with AI OCR"""
+        # Only process certain document types
+        if document.document_type not in [
+            WorkerDocument.DocumentType.NATIONAL_ID,
+            WorkerDocument.DocumentType.PASSPORT,
+            WorkerDocument.DocumentType.EDUCATIONAL_CERTIFICATE
+        ]:
+            return
+        
+        # Create verification request
+        verification_request = DocumentVerificationRequest.objects.create(
+            document=document,
+            ai_service_used='google_vision'
+        )
+        
+        # Process in background
+        from documents.tasks import process_document_verification
+        process_document_verification.delay(
+            verification_request_id=str(verification_request.id)
+        )
+
+
+class DocumentUploadSerializer(serializers.Serializer):
+    """Serializer for document uploads"""
+    document_type = serializers.ChoiceField(
+        choices=WorkerDocument.DocumentType.choices
+    )
+    document_file = serializers.FileField()
+    document_number = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True
+    )
+    issue_date = serializers.DateField(required=False)
+    expiry_date = serializers.DateField(required=False)
+    issuing_authority = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True
+    )
+
+
+class DocumentVerificationRequestSerializer(serializers.ModelSerializer):
+    document = WorkerDocumentSerializer(read_only=True)
+    
+    class Meta:
+        model = DocumentVerificationRequest
+        fields = '__all__'
+        read_only_fields = [
+            'requested_at', 'processed_at', 'completed_at'
+        ]
+
+
+class VerifyDocumentSerializer(serializers.Serializer):
+    """Serializer for manual document verification"""
+    status = serializers.ChoiceField(
+        choices=[
+            WorkerDocument.Status.VERIFIED,
+            WorkerDocument.Status.REJECTED
+        ]
+    )
+    verification_notes = serializers.CharField(
+        max_length=1000,
+        required=False,
+        allow_blank=True
+    )
+    
+    def validate(self, data):
+        status = data.get('status')
+        notes = data.get('verification_notes', '')
+        
+        if status == WorkerDocument.Status.REJECTED and not notes.strip():
+            raise serializers.ValidationError(
+                "Verification notes are required when rejecting a document"
+            )
+        
+        return data
+
+
+class DocumentStatsSerializer(serializers.Serializer):
+    """Serializer for document statistics"""
+    total_documents = serializers.IntegerField()
+    verified_documents = serializers.IntegerField()
+    pending_documents = serializers.IntegerField()
+    rejected_documents = serializers.IntegerField()
+    expired_documents = serializers.IntegerField()
+    verification_rate = serializers.FloatField()
+    average_verification_time_days = serializers.FloatField()
