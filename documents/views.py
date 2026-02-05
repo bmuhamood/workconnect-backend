@@ -1,6 +1,6 @@
 # documents/views.py
 from django.contrib.auth.models import AnonymousUser
-from rest_framework import viewsets, status, permissions, filters
+from rest_framework import viewsets, status, permissions, filters, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -17,7 +17,31 @@ from documents.serializers import (
     DocumentTypeConfigSerializer, DocumentStatsSerializer
 )
 from users.permissions import IsWorker, IsAdmin
-from users.models import Verification, WorkerReference
+from users.models import Verification, WorkerReference, WorkerProfile
+
+# Import serializers from users app at the top level
+try:
+    from users.serializers import (
+        VerificationSerializer, VerifyRequestSerializer,
+        WorkerReferenceSerializer, ReferenceVerifySerializer,
+        VerificationStatsSerializer
+    )
+except ImportError:
+    # Define fallback serializers if imports fail
+    class VerificationSerializer(serializers.Serializer):
+        pass
+    
+    class VerifyRequestSerializer(serializers.Serializer):
+        pass
+    
+    class WorkerReferenceSerializer(serializers.Serializer):
+        pass
+    
+    class ReferenceVerifySerializer(serializers.Serializer):
+        pass
+    
+    class VerificationStatsSerializer(serializers.Serializer):
+        pass
 
 
 class WorkerDocumentViewSet(viewsets.ModelViewSet):
@@ -39,7 +63,11 @@ class WorkerDocumentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         # Handle AnonymousUser (for Swagger/API docs)
-        if isinstance(user, AnonymousUser):
+        if not user.is_authenticated:
+            return WorkerDocument.objects.none()
+        
+        # Check if user has role attribute
+        if not hasattr(user, 'role'):
             return WorkerDocument.objects.none()
         
         if user.role in ['admin', 'super_admin']:
@@ -49,7 +77,9 @@ class WorkerDocumentViewSet(viewsets.ModelViewSet):
             try:
                 worker_profile = user.worker_profile
                 return WorkerDocument.objects.filter(worker=worker_profile)
-            except:
+            except WorkerProfile.DoesNotExist:
+                return WorkerDocument.objects.none()
+            except AttributeError:
                 return WorkerDocument.objects.none()
         
         return WorkerDocument.objects.none()
@@ -108,6 +138,7 @@ class WorkerDocumentViewSet(viewsets.ModelViewSet):
         
         # Check permission
         if (document.worker.user != request.user and 
+            not hasattr(request.user, 'role') or 
             request.user.role not in ['admin', 'super_admin']):
             return Response(
                 {"error": "You don't have permission to download this document"},
@@ -173,12 +204,26 @@ class WorkerDocumentViewSet(viewsets.ModelViewSet):
         if getattr(self, 'swagger_fake_view', False):
             return Response([])
         
+        # Check if user is authenticated
+        if not request.user.is_authenticated:
+            return Response(
+                {"error": "Authentication required"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        # Check if user is a worker
+        if not hasattr(request.user, 'role') or request.user.role != 'worker':
+            return Response(
+                {"error": "Only workers can access this endpoint"},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
         try:
             worker_profile = request.user.worker_profile
             documents = WorkerDocument.objects.filter(worker=worker_profile)
             serializer = self.get_serializer(documents, many=True)
             return Response(serializer.data)
-        except:
+        except WorkerProfile.DoesNotExist:
             return Response(
                 {"error": "Worker profile not found"},
                 status=status.HTTP_400_BAD_REQUEST
@@ -199,7 +244,9 @@ class WorkerDocumentViewSet(viewsets.ModelViewSet):
                 "average_verification_time_days": None
             })
         
-        if request.user.role not in ['admin', 'super_admin']:
+        # Check if user is admin
+        if not request.user.is_authenticated or not hasattr(request.user, 'role') or \
+           request.user.role not in ['admin', 'super_admin']:
             return Response(
                 {"error": "Permission denied"},
                 status=status.HTTP_403_FORBIDDEN
@@ -272,8 +319,12 @@ class DocumentVerificationRequestViewSet(viewsets.ReadOnlyModelViewSet):
             
         user = self.request.user
         
-        # Handle AnonymousUser (for Swagger/API docs)
-        if isinstance(user, AnonymousUser):
+        # Handle AnonymousUser
+        if not user.is_authenticated:
+            return DocumentVerificationRequest.objects.none()
+        
+        # Check if user has role attribute
+        if not hasattr(user, 'role'):
             return DocumentVerificationRequest.objects.none()
             
         if user.role in ['admin', 'super_admin']:
@@ -333,8 +384,12 @@ class DocumentTypeConfigViewSet(viewsets.ModelViewSet):
             
         user = self.request.user
         
-        # Handle AnonymousUser (for Swagger/API docs)
-        if isinstance(user, AnonymousUser):
+        # Handle AnonymousUser
+        if not user.is_authenticated:
+            return DocumentTypeConfig.objects.none()
+        
+        # Check if user has role attribute
+        if not hasattr(user, 'role'):
             return DocumentTypeConfig.objects.none()
             
         if user.role in ['admin', 'super_admin']:
@@ -375,7 +430,6 @@ class DocumentTypeConfigViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        from users.models import WorkerProfile
         try:
             worker = WorkerProfile.objects.get(id=worker_id)
         except WorkerProfile.DoesNotExist:
@@ -436,8 +490,12 @@ class AdminDocumentViewSet(viewsets.ModelViewSet):
             
         user = self.request.user
         
-        # Handle AnonymousUser (for Swagger/API docs)
-        if isinstance(user, AnonymousUser):
+        # Handle AnonymousUser
+        if not user.is_authenticated:
+            return WorkerDocument.objects.none()
+        
+        # Check if user has role attribute
+        if not hasattr(user, 'role'):
             return WorkerDocument.objects.none()
             
         if user.role in ['admin', 'super_admin']:
@@ -539,9 +597,6 @@ class AdminDocumentViewSet(viewsets.ModelViewSet):
 
 class VerificationViewSet(viewsets.ModelViewSet):
     """ViewSet for verifications"""
-    # ADD THIS LINE - You need to import VerificationSerializer
-    from users.serializers import VerificationSerializer
-    
     serializer_class = VerificationSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
@@ -556,8 +611,12 @@ class VerificationViewSet(viewsets.ModelViewSet):
             
         user = self.request.user
         
-        # Handle AnonymousUser (for Swagger/API docs)
-        if isinstance(user, AnonymousUser):
+        # Handle AnonymousUser
+        if not user.is_authenticated:
+            return Verification.objects.none()
+        
+        # Check if user has role attribute
+        if not hasattr(user, 'role'):
             return Verification.objects.none()
         
         if user.role in ['admin', 'super_admin']:
@@ -567,7 +626,9 @@ class VerificationViewSet(viewsets.ModelViewSet):
             try:
                 worker_profile = user.worker_profile
                 return Verification.objects.filter(worker=worker_profile)
-            except:
+            except WorkerProfile.DoesNotExist:
+                return Verification.objects.none()
+            except AttributeError:
                 return Verification.objects.none()
         
         return Verification.objects.none()
@@ -584,9 +645,6 @@ class VerificationViewSet(viewsets.ModelViewSet):
             })
         
         verification = self.get_object()
-        
-        # You need to import VerifyRequestSerializer
-        from users.serializers import VerifyRequestSerializer
         
         serializer = VerifyRequestSerializer(data=request.data)
         if not serializer.is_valid():
@@ -631,9 +689,6 @@ class VerificationViewSet(viewsets.ModelViewSet):
 
 class WorkerReferenceViewSet(viewsets.ModelViewSet):
     """ViewSet for worker references"""
-    # ADD THIS LINE - You need to import WorkerReferenceSerializer
-    from users.serializers import WorkerReferenceSerializer
-    
     serializer_class = WorkerReferenceSerializer
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
@@ -647,8 +702,12 @@ class WorkerReferenceViewSet(viewsets.ModelViewSet):
             
         user = self.request.user
         
-        # Handle AnonymousUser (for Swagger/API docs)
-        if isinstance(user, AnonymousUser):
+        # Handle AnonymousUser
+        if not user.is_authenticated:
+            return WorkerReference.objects.none()
+        
+        # Check if user has role attribute
+        if not hasattr(user, 'role'):
             return WorkerReference.objects.none()
         
         if user.role in ['admin', 'super_admin']:
@@ -658,7 +717,9 @@ class WorkerReferenceViewSet(viewsets.ModelViewSet):
             try:
                 worker_profile = user.worker_profile
                 return WorkerReference.objects.filter(worker=worker_profile)
-            except:
+            except WorkerProfile.DoesNotExist:
+                return WorkerReference.objects.none()
+            except AttributeError:
                 return WorkerReference.objects.none()
         
         return WorkerReference.objects.none()
@@ -668,8 +729,10 @@ class WorkerReferenceViewSet(viewsets.ModelViewSet):
         try:
             worker_profile = self.request.user.worker_profile
             serializer.save(worker=worker_profile)
-        except:
+        except WorkerProfile.DoesNotExist:
             raise serializers.ValidationError("Worker profile not found")
+        except AttributeError:
+            raise serializers.ValidationError("User is not a worker")
     
     @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
     def verify(self, request, pk=None):
@@ -683,9 +746,6 @@ class WorkerReferenceViewSet(viewsets.ModelViewSet):
             })
         
         reference = self.get_object()
-        
-        # You need to import ReferenceVerifySerializer
-        from users.serializers import ReferenceVerifySerializer
         
         serializer = ReferenceVerifySerializer(data=request.data)
         if not serializer.is_valid():
@@ -734,7 +794,6 @@ class VerificationStatsViewSet(viewsets.ViewSet):
         """Get verification statistics"""
         # Check if this is for Swagger schema generation
         if getattr(self, 'swagger_fake_view', False):
-            from users.serializers import VerificationStatsSerializer
             return Response({
                 "total_verifications": 0,
                 "pending_verifications": 0,
@@ -749,9 +808,6 @@ class VerificationStatsViewSet(viewsets.ViewSet):
                 "verified_references": 0,
                 "pending_references": 0
             })
-        
-        # Import the serializer here
-        from users.serializers import VerificationStatsSerializer
         
         # Verification stats
         total_verifications = Verification.objects.count()

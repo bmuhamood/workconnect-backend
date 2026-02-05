@@ -146,6 +146,91 @@ class User(AbstractBaseUser, PermissionsMixin):
             pass
         return None
     
+    # CRITICAL FIX: Add these methods to handle permission checking
+    # This prevents AttributeError when checking user.role
+    def get_role(self):
+        """Safe way to get user role, handles AnonymousUser"""
+        if not hasattr(self, 'role'):
+            return None
+        return self.role
+    
+    def has_role(self, role_name):
+        """Check if user has specific role"""
+        if not hasattr(self, 'role'):
+            return False
+        return self.role == role_name
+    
+    def is_worker(self):
+        """Check if user is a worker"""
+        return self.has_role('worker')
+    
+    def is_employer(self):
+        """Check if user is an employer"""
+        return self.has_role('employer')
+    
+    def is_admin(self):
+        """Check if user is admin or super admin"""
+        return self.has_role('admin') or self.has_role('super_admin')
+    
+    def is_super_admin(self):
+        """Check if user is super admin"""
+        return self.has_role('super_admin')
+    
+    # Add Django authentication compatibility methods
+    @property
+    def is_anonymous(self):
+        """Check if user is anonymous (Django compatibility)"""
+        return False
+    
+    @property
+    def is_authenticated(self):
+        """Check if user is authenticated (Django compatibility)"""
+        return True
+    
+    def has_perm(self, perm, obj=None):
+        """Check if user has specific permission"""
+        # Handle AnonymousUser case
+        if not hasattr(self, 'is_active'):
+            return False
+        
+        # Super admin has all permissions
+        if self.has_role('super_admin'):
+            return True
+        
+        # Admin has most permissions
+        if self.has_role('admin'):
+            return True
+        
+        # Check role-based permissions
+        if perm == "users.view_workerprofile":
+            return self.has_role('employer') or self.has_role('admin') or self.has_role('super_admin')
+        
+        if perm == "users.view_employerprofile":
+            return self.has_role('worker') or self.has_role('admin') or self.has_role('super_admin')
+        
+        # Default to Django's permission checking
+        return super().has_perm(perm, obj)
+    
+    def has_module_perms(self, app_label):
+        """Check if user has permissions for the given app"""
+        # Handle AnonymousUser case
+        if not hasattr(self, 'is_active'):
+            return False
+        
+        # Super admin has all permissions
+        if self.has_role('super_admin'):
+            return True
+        
+        # Admin has most permissions
+        if self.has_role('admin'):
+            return True
+        
+        # Workers and employers have basic permissions
+        if app_label == "users":
+            return True
+        
+        return super().has_module_perms(app_label)
+    
     def save(self, *args, **kwargs):
         # Normalize phone number before saving
         if self.phone:

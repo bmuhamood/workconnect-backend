@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
+from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
 from django.db import transaction
 from django.core.cache import cache
@@ -481,35 +482,99 @@ class UserProfileView(APIView):
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+# users/views.py - UPDATE THIS SECTION
 
 class WorkerProfileViewSet(viewsets.ModelViewSet):
     """Worker Profile Management"""
     serializer_class = WorkerProfileSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_permissions(self):
+        """Set permissions based on action"""
+        if self.action in ['list', 'retrieve']:
+            permission_classes = [permissions.AllowAny]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        return [permission() for permission in permission_classes]
     
     def get_queryset(self):
+        # Check if this is for Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return WorkerProfile.objects.none()
+        
         user = self.request.user
         
-        if user.role == 'worker':
+        # Handle unauthenticated/anonymous users (for public listings)
+        if not user.is_authenticated or isinstance(user, AnonymousUser):
+            # Return only verified workers for public viewing with prefetch
+            return WorkerProfile.objects.filter(
+                verification_status='verified',
+                user__is_active=True
+            ).select_related('user').prefetch_related('skills__category').order_by('-created_at')
+        
+        # Get user role safely
+        user_role = user.get_role() if hasattr(user, 'get_role') else None
+        
+        if not user_role:
+            # If user doesn't have role, return public data
+            return WorkerProfile.objects.filter(
+                verification_status='verified',
+                user__is_active=True
+            ).select_related('user').prefetch_related('skills__category').order_by('-created_at')
+        
+        if user_role == 'worker':
             # Workers can only see their own profile
-            return WorkerProfile.objects.filter(user=user)
-        elif user.role in ['admin', 'super_admin']:
+            return WorkerProfile.objects.filter(user=user).select_related('user').prefetch_related('skills__category')
+        elif user_role in ['admin', 'super_admin']:
             # Admins can see all
-            return WorkerProfile.objects.all()
-        elif user.role == 'employer':
+            return WorkerProfile.objects.all().select_related('user').prefetch_related('skills__category').order_by('-created_at')
+        elif user_role == 'employer':
             # Employers can see available workers
             return WorkerProfile.objects.filter(
                 verification_status='verified',
-                availability='available'
-            )
+                availability='available',
+                user__is_active=True
+            ).select_related('user').prefetch_related('skills__category').order_by('-created_at')
         
-        return WorkerProfile.objects.none()
+        # Default: return public data
+        return WorkerProfile.objects.filter(
+            verification_status='verified',
+            user__is_active=True
+        ).select_related('user').prefetch_related('skills__category').order_by('-created_at')
+    
+    def retrieve(self, request, *args, **kwargs):
+        """Override retrieve to include debug info in development"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        # Add debug info in development
+        response_data = serializer.data
+        
+        if settings.DEBUG:
+            response_data['debug'] = {
+                'skills_count': instance.skills.count(),
+                'has_skills': instance.skills.exists(),
+                'profile_id': str(instance.id)
+            }
+        
+        return Response(response_data)
     
     @action(detail=False, methods=['get'])
     def me(self, request):
         """Get current worker's profile"""
+        # Check if user is authenticated
+        if not request.user.is_authenticated:
+            return Response({
+                'error': 'Authentication required'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Check if user is a worker
+        if not hasattr(request.user, 'role') or request.user.role != 'worker':
+            return Response({
+                'error': 'Only workers can access this endpoint'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
         try:
-            profile = WorkerProfile.objects.get(user=request.user)
+            profile = WorkerProfile.objects.select_related('user').prefetch_related('skills__category').get(user=request.user)
             serializer = self.get_serializer(profile)
             return Response(serializer.data)
         except WorkerProfile.DoesNotExist:
@@ -519,7 +584,14 @@ class WorkerProfileViewSet(viewsets.ModelViewSet):
     
     def create(self, request):
         """Create worker profile"""
-        if request.user.role != 'worker':
+        # Check if user is authenticated
+        if not request.user.is_authenticated:
+            return Response({
+                'error': 'Authentication required'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Check if user is a worker
+        if not hasattr(request.user, 'role') or request.user.role != 'worker':
             return Response({
                 'error': 'Only workers can create worker profiles'
             }, status=status.HTTP_403_FORBIDDEN)
@@ -541,25 +613,66 @@ class WorkerProfileViewSet(viewsets.ModelViewSet):
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
 class EmployerProfileViewSet(viewsets.ModelViewSet):
     """Employer Profile Management"""
     serializer_class = EmployerProfileSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_permissions(self):
+        """Set permissions based on action"""
+        if self.action in ['list', 'retrieve']:
+            permission_classes = [permissions.AllowAny]
+        else:
+            permission_classes = [permissions.IsAuthenticated]
+        return [permission() for permission in permission_classes]
     
     def get_queryset(self):
+        # Check if this is for Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return EmployerProfile.objects.none()
+        
         user = self.request.user
         
-        if user.role == 'employer':
-            return EmployerProfile.objects.filter(user=user)
-        elif user.role in ['admin', 'super_admin']:
-            return EmployerProfile.objects.all()
+        # Handle unauthenticated/anonymous users (for public listings)
+        if not user.is_authenticated or isinstance(user, AnonymousUser):
+            # Return only verified employers for public viewing
+            return EmployerProfile.objects.filter(
+                user__is_active=True
+            ).order_by('-created_at')
         
-        return EmployerProfile.objects.none()
+        # Get user role safely
+        user_role = user.get_role() if hasattr(user, 'get_role') else None
+        
+        if not user_role:
+            # If user doesn't have role, return public data
+            return EmployerProfile.objects.filter(
+                user__is_active=True
+            ).order_by('-created_at')
+        
+        if user_role == 'employer':
+            return EmployerProfile.objects.filter(user=user)
+        elif user_role in ['admin', 'super_admin']:
+            return EmployerProfile.objects.all().order_by('-created_at')
+        
+        # Default: return public data for authenticated users
+        return EmployerProfile.objects.filter(
+            user__is_active=True
+        ).order_by('-created_at')
     
     @action(detail=False, methods=['get'])
     def me(self, request):
         """Get current employer's profile"""
+        # Check if user is authenticated
+        if not request.user.is_authenticated:
+            return Response({
+                'error': 'Authentication required'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Check if user is an employer
+        if not hasattr(request.user, 'role') or request.user.role != 'employer':
+            return Response({
+                'error': 'Only employers can access this endpoint'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
         try:
             profile = EmployerProfile.objects.get(user=request.user)
             serializer = self.get_serializer(profile)
@@ -571,7 +684,14 @@ class EmployerProfileViewSet(viewsets.ModelViewSet):
     
     def create(self, request):
         """Create employer profile"""
-        if request.user.role != 'employer':
+        # Check if user is authenticated
+        if not request.user.is_authenticated:
+            return Response({
+                'error': 'Authentication required'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Check if user is an employer
+        if not hasattr(request.user, 'role') or request.user.role != 'employer':
             return Response({
                 'error': 'Only employers can create employer profiles'
             }, status=status.HTTP_403_FORBIDDEN)

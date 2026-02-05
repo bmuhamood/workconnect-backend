@@ -9,9 +9,31 @@ import re
 from django.db import transaction
 from django.core.validators import RegexValidator
 
-from .models import User, WorkerProfile, EmployerProfile
+from .models import User, WorkerProfile, EmployerProfile, WorkerSkill, JobCategory
 
 User = get_user_model()
+
+
+# ============= SKILL SERIALIZERS =============
+class JobCategorySerializer(serializers.ModelSerializer):
+    """Job Category Serializer"""
+    
+    class Meta:
+        model = JobCategory
+        fields = ['id', 'name', 'description', 'icon', 'is_active', 'created_at']
+
+
+class WorkerSkillSerializer(serializers.ModelSerializer):
+    """Worker Skill Serializer"""
+    
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    
+    class Meta:
+        model = WorkerSkill
+        fields = [
+            'id', 'skill_name', 'proficiency_level', 'years_of_experience',
+            'is_primary', 'category', 'category_name', 'created_at'
+        ]
 
 
 # ============= USER SERIALIZERS =============
@@ -419,6 +441,8 @@ class PhoneVerificationRequestSerializer(serializers.Serializer):
         return '+' + phone
 
 
+# users/serializers.py - UPDATE THIS SECTION
+
 # ============= PROFILE SERIALIZERS =============
 class WorkerProfileSerializer(serializers.ModelSerializer):
     """Worker Profile Serializer"""
@@ -427,15 +451,20 @@ class WorkerProfileSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     email = serializers.EmailField(source='user.email', read_only=True)
     phone = serializers.CharField(source='user.phone', read_only=True)
+    skills = WorkerSkillSerializer(many=True, read_only=True)  # Remove 'source' parameter
     
     class Meta:
         model = WorkerProfile
         fields = [
             'id', 'email', 'phone', 'first_name', 'last_name', 'full_name', 'age',
-            'date_of_birth', 'gender', 'national_id', 'city', 'profession',
-            'experience_years', 'additional_skills', 'availability', 'hourly_rate',
-            'verification_status', 'trust_score', 'rating_average', 'total_reviews',
-            'total_placements', 'created_at', 'updated_at'
+            'date_of_birth', 'gender', 'national_id', 'city', 'district',
+            'location_lat', 'location_lng', 'profile_photo_url', 'bio',
+            'profession', 'experience_years', 'education_level', 'languages',
+            'additional_skills', 'hourly_rate', 'availability',
+            'expected_salary_min', 'expected_salary_max', 'verification_status',
+            'trust_score', 'rating_average', 'total_reviews', 'total_placements',
+            'subscription_tier', 'subscription_expires_at', 'created_at',
+            'updated_at', 'skills'
         ]
         read_only_fields = [
             'id', 'verification_status', 'trust_score', 'rating_average',
@@ -454,24 +483,46 @@ class WorkerProfileSerializer(serializers.ModelSerializer):
         return f"{obj.first_name} {obj.last_name}"
     
     def to_representation(self, instance):
-        """Convert skills from string to list for API response"""
+        """Convert additional_skills from string to list for API response"""
         data = super().to_representation(instance)
         
-        # Convert skills string to list
+        # Convert languages from list to dictionary if it's a list
+        if 'languages' in data and isinstance(data['languages'], list):
+            # Convert list of languages to dictionary format
+            languages_dict = {}
+            for lang in data['languages']:
+                if isinstance(lang, dict) and 'language' in lang and 'level' in lang:
+                    languages_dict[lang['language']] = lang['level']
+                elif isinstance(lang, str):
+                    languages_dict[lang] = 'Intermediate'
+            data['languages'] = languages_dict
+        
+        # Convert additional_skills from string to list
         if 'additional_skills' in data and data['additional_skills']:
-            skills = data['additional_skills'].split(',')
-            data['additional_skills'] = [skill.strip() for skill in skills if skill.strip()]
+            if isinstance(data['additional_skills'], str):
+                skills = data['additional_skills'].split(',')
+                data['additional_skills'] = [skill.strip() for skill in skills if skill.strip()]
+            elif isinstance(data['additional_skills'], list):
+                # Already a list, ensure all items are strings
+                data['additional_skills'] = [str(skill).strip() for skill in data['additional_skills'] if skill]
         else:
             data['additional_skills'] = []
         
         return data
     
     def to_internal_value(self, data):
-        """Convert skills list to string for database storage"""
+        """Convert additional_skills list to string for database storage"""
         if 'additional_skills' in data and isinstance(data['additional_skills'], list):
             data['additional_skills'] = ', '.join([str(skill).strip() for skill in data['additional_skills'] if skill])
+        
+        # Convert languages dictionary to list if needed
+        if 'languages' in data and isinstance(data['languages'], dict):
+            languages_list = []
+            for language, level in data['languages'].items():
+                languages_list.append({'language': language, 'level': level})
+            data['languages'] = languages_list
+        
         return super().to_internal_value(data)
-
 
 class EmployerProfileSerializer(serializers.ModelSerializer):
     """Employer Profile Serializer"""
@@ -484,8 +535,9 @@ class EmployerProfileSerializer(serializers.ModelSerializer):
         model = EmployerProfile
         fields = [
             'id', 'email', 'phone', 'first_name', 'last_name', 'full_name',
-            'company_name', 'address', 'city', 'profile_photo_url',
-            'id_number', 'id_verified', 'created_at', 'updated_at'
+            'company_name', 'address', 'city', 'district', 'location_lat',
+            'location_lng', 'profile_photo_url', 'id_number', 'id_verified',
+            'subscription_tier', 'subscription_expires_at', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
     
